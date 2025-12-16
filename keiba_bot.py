@@ -23,17 +23,17 @@ SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", "")
 
 # デフォルト設定（サイドバー等で set_race_params が呼ばれると書き換わる）
 YEAR = "2025"
-KAI = "04"
-PLACE = "02"
-DAY = "02"
+PLACE_CODE = "11"
+MONTH = "12"
+DAY = "16"
 
 
-def set_race_params(year, kai, place, day):
-    """main.py から開催情報を差し替えるための関数"""
-    global YEAR, KAI, PLACE, DAY
+def set_race_params(year, place_code, month, day):
+    """app.py から開催情報を差し替えるための関数"""
+    global YEAR, PLACE_CODE, MONTH, DAY
     YEAR = str(year)
-    KAI = str(kai).zfill(2)
-    PLACE = str(place).zfill(2)
+    PLACE_CODE = str(place_code).zfill(2)
+    MONTH = str(month).zfill(2)
     DAY = str(day).zfill(2)
 
 
@@ -49,9 +49,9 @@ def get_supabase_client() -> Client | None:
 
 def save_history(
     year: str,
-    kai: str,
     place_code: str,
     place_name: str,
+    month: str,
     day: str,
     race_num_str: str,
     race_id: str,
@@ -62,12 +62,15 @@ def save_history(
     if supabase is None:
         return
 
+    # 地方競馬に合わせてカラム内容は適宜読み替えて保存
+    # (既存テーブルの構造を変えないため、kaiやdayに便宜的に値を入れる)
     data = {
         "year": str(year),
-        "kai": str(kai),
+        "kai": "",          # 地方では不使用のため空文字
         "place_code": str(place_code),
         "place_name": place_name,
-        "day": str(day),
+        "day": str(day),    # 日付(日)を入れる
+        "month": str(month), # ※DBにカラムがあれば入れる、なければ省略
         "race_num": race_num_str,
         "race_id": race_id,
         "output_text": ai_answer,
@@ -80,9 +83,10 @@ def save_history(
 
 
 # ==================================================
-# HTML パース関数群 (変更なし)
+# HTML パース関数群
 # ==================================================
 def parse_race_info(html: str):
+    """レース情報のヘッダーを取得"""
     soup = BeautifulSoup(html, "html.parser")
     racetitle = soup.find("div", class_="racetitle")
     if not racetitle:
@@ -115,79 +119,8 @@ def parse_race_info(html: str):
         "course_line": course_line,
     }
 
-
-def parse_zenkoso_interview(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    h2 = soup.find("h2", string=lambda s: s and "前走のインタビュー" in s)
-    if not h2:
-        return []
-
-    midasi = h2.find_parent("div", class_="midasi")
-    table = midasi.find_next("table", class_="syoin")
-    if not table or not table.tbody:
-        return []
-
-    rows = table.tbody.find_all("tr")
-    result = []
-    i = 0
-    while i < len(rows):
-        row = rows[i]
-        if "spacer" in (row.get("class") or []):
-            i += 1
-            continue
-
-        waku_td = row.find("td", class_="waku")
-        uma_td = row.find("td", class_="umaban")
-        bamei_td = row.find("td", class_="bamei")
-        if not (waku_td and uma_td and bamei_td):
-            i += 1
-            continue
-
-        waku = waku_td.get_text(strip=True)
-        umaban = uma_td.get_text(strip=True)
-        name = bamei_td.get_text(strip=True)
-
-        prev_date = ""
-        prev_class = ""
-        prev_finish = ""
-        prev_comment = ""
-
-        detail = rows[i + 1] if i + 1 < len(rows) else None
-        if detail:
-            syoin_td = detail.find("td", class_="syoin")
-            if syoin_td:
-                sdata = syoin_td.find("div", class_="syoindata")
-                if sdata:
-                    ps = sdata.find_all("p")
-                    if ps:
-                        prev_date = ps[0].get_text(strip=True)
-                    if len(ps) >= 2:
-                        spans = ps[1].find_all("span")
-                        if len(spans) >= 1:
-                            prev_class = spans[0].get_text(strip=True)
-                        if len(spans) >= 2:
-                            prev_finish = spans[1].get_text(strip=True)
-
-                direct = syoin_td.find_all("p", recursive=False)
-                if direct:
-                    txt = direct[0].get_text(strip=True)
-                    if txt != "－":
-                        prev_comment = txt
-
-        result.append({
-            "waku": waku,
-            "umaban": umaban,
-            "name": name,
-            "prev_date_course": prev_date,
-            "prev_class": prev_class,
-            "prev_finish": prev_finish,
-            "prev_comment": prev_comment,
-        })
-        i += 2
-    return result
-
-
 def parse_danwa_comments(html: str):
+    """厩舎の話（談話）をパース"""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", class_="danwa")
     if not table or not table.tbody:
@@ -207,6 +140,7 @@ def parse_danwa_comments(html: str):
 
 
 def parse_cyokyo(html: str):
+    """調教データをパース"""
     soup = BeautifulSoup(html, "html.parser")
     cyokyo_dict = {}
     section = None
@@ -245,10 +179,12 @@ def parse_cyokyo(html: str):
 
 BASE_URL = "https://s.keibabook.co.jp"
 def fetch_cyokyo_dict(driver, race_id: str):
-    url = f"{BASE_URL}/cyuou/cyokyo/0/{race_id}"
+    # 地方競馬URL: /chihou/cyokyo/1/{ID}
+    url = f"{BASE_URL}/chihou/cyokyo/1/{race_id}"
     driver.get(url)
     try:
-        WebDriverWait(driver, 10).until(
+        # 要素が見つからなくてもエラーにせず、空なら空を返す
+        WebDriverWait(driver, 5).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "table.cyokyo"))
         )
     except Exception:
@@ -258,20 +194,16 @@ def fetch_cyokyo_dict(driver, race_id: str):
 
 
 # ==================================================
-# ★Dify ワークフロー用ストリーミング関数 (強化版)
+# ★Dify ワークフロー用ストリーミング関数
 # ==================================================
 def stream_dify_workflow(full_text: str):
-    """
-    Dify Workflow をストリーミングモードで呼び出し、
-    ブロッキング回避(脈打ち)をしつつ、最終的な答えを確実に抽出してyieldする。
-    """
     if not DIFY_API_KEY:
         yield "⚠️ エラー: DIFY_API_KEY が設定されていません。"
         return
 
     payload = {
         "inputs": {"text": full_text},
-        "response_mode": "streaming",  # ストリーミング必須
+        "response_mode": "streaming",
         "user": "keiba-bot-user",
     }
 
@@ -281,7 +213,6 @@ def stream_dify_workflow(full_text: str):
     }
 
     try:
-        # タイムアウトを長めに設定(5分)
         res = requests.post(
             "https://api.dify.ai/v1/workflows/run",
             headers=headers,
@@ -294,43 +225,31 @@ def stream_dify_workflow(full_text: str):
             yield f"⚠️ エラー: Dify API Error {res.status_code}\n{res.text}"
             return
 
-        # 1行ずつ受信
         for line in res.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
                 if decoded_line.startswith("data:"):
                     json_str = decoded_line.replace("data: ", "")
-                    
                     try:
                         data = json.loads(json_str)
                         event = data.get("event")
-                        
-                        # ★通信維持のための脈打ち（重要）
-                        # 途中経過イベントの時は空文字を返してループを止めない
                         if event in ["workflow_started", "node_started", "node_finished"]:
                             yield ""
                             continue
-
-                        # パターン1: Chatアプリライクなストリーミング
                         chunk = data.get("answer", "")
                         if chunk:
                             yield chunk
-
-                        # パターン2: Workflow完了時の一括出力
                         if event == "workflow_finished":
                             outputs = data.get("data", {}).get("outputs", {})
                             if outputs:
-                                # 変数名が何であっても、値があるものを結合して返す
                                 found_text = ""
                                 for key, value in outputs.items():
                                     if isinstance(value, str):
                                         found_text += value + "\n"
-                                
                                 if found_text:
                                     yield found_text
                                 else:
                                     yield f"⚠️ テキストが見つかりませんでした。Raw: {outputs}"
-
                     except json.JSONDecodeError:
                         pass
                     except Exception as e:
@@ -345,22 +264,22 @@ def stream_dify_workflow(full_text: str):
 # ==================================================
 def run_all_races(target_races=None):
     """
-    全頭データをスクレイピング -> Difyへ送信 -> ストリーミング表示 -> Supabase保存
+    地方競馬IDルールに基づきスクレイピング -> Difyへ送信 -> ストリーミング表示 -> Supabase保存
     """
     
-    # レース番号のリスト作成
     race_numbers = (
         list(range(1, 13))
         if target_races is None
         else sorted({int(r) for r in target_races})
     )
 
-    base_id = f"{YEAR}{KAI}{PLACE}{DAY}"
     place_names = {
-        "00": "京都", "01": "阪神", "02": "中京", "03": "小倉", "04": "東京",
-        "05": "中山", "06": "福島", "07": "新潟", "08": "札幌", "09": "函館",
+        "10": "大井", "11": "川崎", "12": "船橋", "13": "浦和",
+        "30": "園田", "42": "門別", "19": "笠松", "34": "名古屋",
+        "20": "金沢", "29": "水沢", "33": "盛岡", "58": "帯広",
+        "26": "高知", "23": "佐賀"
     }
-    place_name = place_names.get(PLACE, "不明")
+    place_name = place_names.get(PLACE_CODE, "地方")
 
     # Selenium 設定
     options = Options()
@@ -386,19 +305,21 @@ def run_all_races(target_races=None):
             EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='submit'], .btn-login"))
         ).click()
         
-        time.sleep(2) # 遷移待ち
+        time.sleep(2)
 
         st.success("ログイン成功。レース分析を開始します。")
 
         # --- 2. 各レース処理 ---
         for r in race_numbers:
-            race_num = f"{r:02}"
-            race_id = base_id + race_num
+            race_num_str = f"{r:02}"
+            
+            # ★URL生成ルール変更（ユーザー指定: 年 + 11(固定) + 競馬場 + 01(固定) + レース + 月日）
+            # 例: 2025 + 11 + 11(川崎) + 01 + 01(1R) + 1216(日付)
+            date_str = f"{MONTH}{DAY}"
+            race_id = f"{YEAR}11{PLACE_CODE}01{race_num_str}{date_str}"
 
-            # UI: レースごとのヘッダー
             st.markdown(f"### {place_name} {r}R")
             
-            # ステータス表示用のコンテナ（ここに状況を逐次出す）
             status_area = st.empty()
             result_area = st.empty()
             full_answer = ""
@@ -407,40 +328,43 @@ def run_all_races(target_races=None):
                 # ==========================
                 # Phase A: データ収集中
                 # ==========================
-                status_area.info(f"📡 {place_name}{r}R のデータを収集中... (数秒かかります)")
+                status_area.info(f"📡 {place_name}{r}R のデータを収集中... (ID: {race_id})")
                 
-                # A-1. 厩舎コメント・基本情報
-                url_danwa = f"https://s.keibabook.co.jp/cyuou/danwa/0/{race_id}"
+                # A-1. 厩舎コメント・基本情報 (地方URL: /chihou/danwa/1/...)
+                url_danwa = f"https://s.keibabook.co.jp/chihou/danwa/1/{race_id}"
                 driver.get(url_danwa)
                 time.sleep(1)
                 html_danwa = driver.page_source
+                
+                # 取得可否チェック（タイトルが取れるかで判断）
                 race_info = parse_race_info(html_danwa)
                 danwa_dict = parse_danwa_comments(html_danwa)
 
-                # A-2. 前走インタビュー
-                url_inter = f"https://s.keibabook.co.jp/cyuou/syoin/{race_id}"
-                driver.get(url_inter)
-                time.sleep(1)
-                zenkoso = parse_zenkoso_interview(driver.page_source)
+                # A-2. 前走インタビューは削除 (ユーザー指示により割愛)
 
-                # A-3. 調教
+                # A-3. 調教 (地方URL: /chihou/cyokyo/1/...)
                 cyokyo_dict = fetch_cyokyo_dict(driver, race_id)
 
                 # A-4. データ結合
+                # 地方競馬はすべての馬のデータが揃わないことがあるため、
+                # danwa_dict のキー(馬番)をベースにするか、1~16番までループするか。
+                # ここでは danwa_dict または cyokyo_dict に存在する馬番を網羅的にリストアップする。
+                all_uma = sorted(list(set(list(danwa_dict.keys()) + list(cyokyo_dict.keys()))), key=lambda x: int(x) if x.isdigit() else 99)
+
                 merged = []
-                for h in zenkoso:
-                    uma = h["umaban"]
+                for uma in all_uma:
+                    d_txt = danwa_dict.get(uma, '（情報なし）')
+                    c_txt = cyokyo_dict.get(uma, '（情報なし）')
+                    
                     text = (
-                        f"▼[枠{h['waku']} 馬番{uma}] {h['name']}\n"
-                        f"  【厩舎の話】 {danwa_dict.get(uma, '（無し）')}\n"
-                        f"  【前走情報】 {h['prev_date_course']} ({h['prev_class']}) {h['prev_finish']}\n"
-                        f"  【前走談話】 {h['prev_comment'] or '（無し）'}\n"
-                        f"  【調教】 {cyokyo_dict.get(uma, '（無し）')}\n"
+                        f"▼[馬番{uma}]\n"
+                        f"  【厩舎の話】 {d_txt}\n"
+                        f"  【調教】 {c_txt}\n"
                     )
                     merged.append(text)
 
                 if not merged:
-                    status_area.warning(f"⚠️ {place_name} {r}R: データが取得できませんでした。スキップします。")
+                    status_area.warning(f"⚠️ {place_name} {r}R: データが取得できませんでした(ID: {race_id})。スキップします。")
                     continue
 
                 # プロンプト作成
@@ -455,8 +379,8 @@ def run_all_races(target_races=None):
                 full_text = (
                     "■レース情報\n"
                     f"{race_header}\n\n"
-                    f"以下は{place_name}{r}Rの全頭データである。\n"
-                    "各馬について【厩舎の話】【前走情報・前走談話】【調教】を基に分析せよ。\n\n"
+                    f"以下は{place_name}{r}Rのデータである。\n"
+                    "各馬について【厩舎の話】および【調教】を基に分析せよ。\n\n"
                     "■出走馬詳細データ\n"
                     + merged_text
                 )
@@ -464,26 +388,24 @@ def run_all_races(target_races=None):
                 # ==========================
                 # Phase B: AI思考中
                 # ==========================
-                status_area.info("🤖 AIが分析・執筆中です... (数十秒〜1分ほどお待ちください)")
+                status_area.info("🤖 AIが分析・執筆中です...")
                 
-                # Difyストリーミング呼び出し
                 for chunk in stream_dify_workflow(full_text):
                     if chunk:
                         full_answer += chunk
-                        # 思考中でもここが更新される（カーソル表示）
                         result_area.markdown(full_answer + "▌")
                 
                 # ==========================
                 # Phase C: 完了
                 # ==========================
-                result_area.markdown(full_answer) # 最終結果表示（カーソル消す）
+                result_area.markdown(full_answer)
                 
                 if full_answer:
                     status_area.success("✅ 分析完了")
                     # Supabase 保存
                     save_history(
-                        YEAR, KAI, PLACE, place_name, DAY,
-                        race_num, race_id, full_answer
+                        YEAR, PLACE_CODE, place_name, MONTH, DAY,
+                        race_num_str, race_id, full_answer
                     )
                 else:
                     status_area.error("⚠️ AIからの回答が空でした。")
@@ -493,7 +415,6 @@ def run_all_races(target_races=None):
                 print(err_msg)
                 status_area.error(err_msg)
             
-            # レース間の区切り線
             st.write("---")
 
     finally:
