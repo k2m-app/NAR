@@ -48,14 +48,14 @@ def show_history():
         return
 
     for row in rows:
+        # 地方競馬用に表示を少し調整
         title = f"{row.get('created_at', '')} / {row.get('place_name', '')} {row.get('race_num', '')}R"
         with st.expander(title):
             st.write(f"**日付**: {row.get('created_at', '')}")
             st.write(
                 f"**開催**: {row.get('year', '')}年 "
-                f"{row.get('kai', '')}回 "
                 f"{row.get('place_name', '')} "
-                f"{row.get('day', '')}日目"
+                f"{row.get('month', '')}月{row.get('day', '')}日"
             )
             st.write(f"**レース**: {row.get('race_num', '')}R（ID: {row.get('race_id', '')}）")
             st.write("---")
@@ -63,7 +63,7 @@ def show_history():
             st.write(row.get("output_text", ""))
 
 
-st.title("🐎 競馬AI分析アプリ")
+st.title("🐎 地方競馬AI分析アプリ")
 mode = st.sidebar.radio("メニュー", ["予想する", "直近1週間の履歴を見る"])
 
 if mode == "予想する":
@@ -71,18 +71,22 @@ if mode == "予想する":
 
     year = st.sidebar.text_input("年 (YEAR)", "2025")
 
-    kai_options = [f"{i:02}" for i in range(1, 7)]
-    kai = st.sidebar.selectbox("回 (KAI)", kai_options, index=3)
+    # 月 (MONTH)
+    month_options = [f"{i:02}" for i in range(1, 13)]
+    month = st.sidebar.selectbox("月 (MONTH)", month_options, index=11) # デフォルト12月
 
-    day_options = [f"{i:02}" for i in range(1, 13)]
-    day = st.sidebar.selectbox("日目 (DAY)", day_options, index=6)
+    # 日 (DAY)
+    day_options = [f"{i:02}" for i in range(1, 32)]
+    day = st.sidebar.selectbox("日 (DAY)", day_options, index=15) # デフォルト16日
 
+    # 地方競馬場コードマップ
     places = {
-        "00": "京都", "01": "阪神", "02": "中京", "03": "小倉",
-        "04": "東京", "05": "中山", "06": "福島", "07": "新潟",
-        "08": "札幌", "09": "函館"
+        "10": "大井", "11": "川崎", "12": "船橋", "13": "浦和",
+        "30": "園田", "42": "門別", "19": "笠松", "34": "名古屋",
+        "20": "金沢", "29": "水沢", "33": "盛岡", "58": "帯広",
+        "26": "高知", "23": "佐賀"
     }
-    place_name = st.sidebar.selectbox("競馬場 (PLACE)", list(places.values()), index=4)
+    place_name = st.sidebar.selectbox("競馬場 (PLACE)", list(places.values()), index=1) # デフォルト川崎
     place_code = [k for k, v in places.items() if v == place_name][0]
 
     st.sidebar.header("分析するレースを選択")
@@ -108,13 +112,13 @@ if mode == "予想する":
     with col2:
         st.button("全解除", on_click=clear_all_races)
 
-    # checkbox表示（valueは不要。keyのstateが使われる）
+    # checkbox表示
     selected_races = []
     for i in range(1, 13):
         if st.sidebar.checkbox(f"{i}R", key=f"race_{i}"):
             selected_races.append(i)
 
-    st.write(f"### 設定: {year}年 {kai}回 {place_name} {day}日目")
+    st.write(f"### 設定: {year}年 {month}月{day}日 {place_name}")
     st.write("サイドバーでレースを選んでから、ボタンを押すと分析を開始します。")
 
     if st.button("分析スタート 🚀"):
@@ -123,7 +127,8 @@ if mode == "予想する":
         else:
             with st.spinner("分析中...これには数分かかります..."):
                 try:
-                    keiba_bot.set_race_params(year, kai, place_code, day)
+                    # 地方競馬用にパラメータセット
+                    keiba_bot.set_race_params(year, place_code, month, day)
                     keiba_bot.run_all_races(target_races=selected_races)
                     st.success(f"{', '.join(f'{r}R' for r in selected_races)} の分析が完了しました！")
                 except Exception as e:
