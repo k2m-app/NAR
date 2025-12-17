@@ -82,7 +82,6 @@ def fetch_race_ids_from_schedule(driver, year, month, day, target_place_code):
     
     # ページ内のリンクからレースIDパターン(16桁)を探す
     # IDの5-6桁目が place_code と一致するものだけを抽出
-    # href例: /chihou/race/20251112041101...
     
     seen = set()
     for a in soup.find_all("a", href=True):
@@ -98,7 +97,6 @@ def fetch_race_ids_from_schedule(driver, year, month, day, target_place_code):
                     seen.add(rid)
     
     # レース番号順(IDの後ろの方にあるR番号でソート)
-    # ID構造の詳細は不明だが、通常数値順で取得されるためそのままソート
     race_ids.sort()
     
     if not race_ids:
@@ -217,7 +215,7 @@ def stream_dify_workflow(full_text: str):
 # ==================================================
 # メイン実行ロジック
 # ==================================================
-def run_all_races():
+def run_all_races(target_races=None):
     place_names = {"10": "大井", "11": "川崎", "12": "船橋", "13": "浦和"}
     place_name = place_names.get(PLACE_CODE, "地方")
 
@@ -236,7 +234,7 @@ def run_all_races():
         driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
         time.sleep(1)
 
-        # 2. 日程ページからIDリストを取得 (ここを変更)
+        # 2. 日程ページからIDリストを取得
         race_ids = fetch_race_ids_from_schedule(driver, YEAR, MONTH, DAY, PLACE_CODE)
         
         if not race_ids:
@@ -245,6 +243,11 @@ def run_all_races():
         # 3. 各レースをループ処理
         for i, race_id in enumerate(race_ids):
             race_num = i + 1  # リスト順＝レース順と仮定
+            
+            # 【追加】指定されたレース以外はスキップ
+            if target_races is not None and race_num not in target_races:
+                continue
+
             race_num_str = f"{race_num:02}"
             
             st.markdown(f"### {place_name} {race_num}R (ID: {race_id})")
