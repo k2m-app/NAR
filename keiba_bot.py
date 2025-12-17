@@ -142,18 +142,32 @@ def parse_cyokyo(html: str):
 def parse_syutuba_jockey(html: str):
     soup = BeautifulSoup(html, "html.parser")
     jockey_info = {}
-    sections = soup.find_all("div", class_="section")
-    for sec in sections:
-        umaban_div = sec.find("div", class_="umaban")
-        if not umaban_div: continue
-        umaban = umaban_div.get_text(strip=True)
-        kisyu_p = sec.find("p", class_="kisyu")
-        if kisyu_p:
-            is_change = True if kisyu_p.find("strong") else False
-            name = kisyu_p.get_text(strip=True)
+    
+    # 出馬表は通常 table 構造です。
+    # ページ内のすべての tr を走査し、クラス名 "umaban" と "kisyu" を持つセルを探します。
+    rows = soup.find_all("tr")
+    
+    for row in rows:
+        # 馬番のセルを取得 (td または th)
+        umaban_tag = row.find(["td", "th"], class_="umaban")
+        # 騎手のセルを取得 (td)
+        kisyu_tag = row.find("td", class_="kisyu")
+        
+        if umaban_tag and kisyu_tag:
+            umaban = umaban_tag.get_text(strip=True)
+            
+            # 乗り替わりの判定
+            # strongタグがある、またはスタイル等で判定が必要な場合がありますが、
+            # まずは strong タグの有無で判定する既存ロジックを踏襲します。
+            is_change = True if kisyu_tag.find("strong") else False
+            
+            # テキスト取得（余計な改行などを除去）
+            name = kisyu_tag.get_text(strip=True)
+            
+            # データ格納（馬番が数値であることを想定）
             jockey_info[umaban] = {"name": name, "is_change": is_change}
+            
     return jockey_info
-
 # ==================================================
 # URL / ID 制御ロジック (ここが重要)
 # ==================================================
