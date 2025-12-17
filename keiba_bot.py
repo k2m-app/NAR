@@ -91,7 +91,7 @@ def fetch_race_ids_from_schedule(driver, year, month, day, target_place_code):
             rid = match.group(1)
             # IDの構造: YYYY(4) + PLACE(2) + ...
             # target_place_code (例: "11") が IDの 5,6文字目と一致するか確認
-            if rid[4:6] == target_place_code:
+            if rid[6:8] == target_place_code:
                 if rid not in seen:
                     race_ids.append(rid)
                     seen.add(rid)
