@@ -23,10 +23,9 @@ SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", "")
 
 # デフォルト設定（サイドバー等で set_race_params が呼ばれると書き換わる）
 YEAR = "2025"
-PLACE_CODE = "11"
+PLACE_CODE = "11" # 川崎など
 MONTH = "12"
-DAY = "16"
-
+DAY = "18"
 
 def set_race_params(year, place_code, month, day):
     """app.py から開催情報を差し替えるための関数"""
@@ -35,7 +34,6 @@ def set_race_params(year, place_code, month, day):
     PLACE_CODE = str(place_code).zfill(2)
     MONTH = str(month).zfill(2)
     DAY = str(day).zfill(2)
-
 
 # ==================================================
 # Supabase クライアント
@@ -46,31 +44,19 @@ def get_supabase_client() -> Client | None:
         return None
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-
-def save_history(
-    year: str,
-    place_code: str,
-    place_name: str,
-    month: str,
-    day: str,
-    race_num_str: str,
-    race_id: str,
-    ai_answer: str,
-) -> None:
+def save_history(year, place_code, place_name, month, day, race_num_str, race_id, ai_answer):
     """history テーブルに 1 レース分の予想を保存する。"""
     supabase = get_supabase_client()
     if supabase is None:
         return
 
-    # 地方競馬に合わせてカラム内容は適宜読み替えて保存
-    # (既存テーブルの構造を変えないため、kaiやdayに便宜的に値を入れる)
     data = {
         "year": str(year),
-        "kai": "",          # 地方では不使用のため空文字
+        "kai": "",          
         "place_code": str(place_code),
         "place_name": place_name,
-        "day": str(day),    # 日付(日)を入れる
-        "month": str(month), # ※DBにカラムがあれば入れる、なければ省略
+        "day": str(day),    
+        "month": str(month), 
         "race_num": race_num_str,
         "race_id": race_id,
         "output_text": ai_answer,
@@ -81,10 +67,10 @@ def save_history(
     except Exception as e:
         print("Supabase insert error:", e)
 
-
 # ==================================================
 # HTML パース関数群
 # ==================================================
+
 def parse_race_info(html: str):
     """レース情報のヘッダーを取得"""
     soup = BeautifulSoup(html, "html.parser")
@@ -138,7 +124,6 @@ def parse_danwa_comments(html: str):
             current = None
     return danwa_dict
 
-
 def parse_cyokyo(html: str):
     """調教データをパース"""
     soup = BeautifulSoup(html, "html.parser")
@@ -176,14 +161,46 @@ def parse_cyokyo(html: str):
         cyokyo_dict[umaban] = final_text
     return cyokyo_dict
 
+def parse_syutuba_jockey(html: str):
+    """
+    出馬表（/chihou/syutuba/）から騎手情報と乗り替わり判定を取得
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    jockey_info = {}
+    
+    # 競馬ブックのスマホ版構造に対応：<div class="section"> 内に各馬の情報がある
+    sections = soup.find_all("div", class_="section")
+    
+    for sec in sections:
+        # 馬番の取得
+        umaban_div = sec.find("div", class_="umaban")
+        if not umaban_div:
+            continue
+        umaban = umaban_div.get_text(strip=True)
+        
+        # 騎手名の取得
+        # <p class="kisyu"><strong>町田直</strong></p> のような構造を探す
+        kisyu_p = sec.find("p", class_="kisyu")
+        if kisyu_p:
+            # <strong>タグがある場合、乗り替わりと判定
+            is_change = True if kisyu_p.find("strong") else False
+            
+            # テキスト（騎手名）のみ抽出
+            name = kisyu_p.get_text(strip=True)
+            
+            jockey_info[umaban] = {
+                "name": name,
+                "is_change": is_change
+            }
+            
+    return jockey_info
 
 BASE_URL = "https://s.keibabook.co.jp"
+
 def fetch_cyokyo_dict(driver, race_id: str):
-    # 地方競馬URL: /chihou/cyokyo/1/{ID}
     url = f"{BASE_URL}/chihou/cyokyo/1/{race_id}"
     driver.get(url)
     try:
-        # 要素が見つからなくてもエラーにせず、空なら空を返す
         WebDriverWait(driver, 5).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "table.cyokyo"))
         )
@@ -192,6 +209,19 @@ def fetch_cyokyo_dict(driver, race_id: str):
     html = driver.page_source
     return parse_cyokyo(html)
 
+def fetch_syutuba_dict(driver, race_id: str):
+    """出馬表ページを取得して騎手情報を返す"""
+    url = f"{BASE_URL}/chihou/syutuba/1/{race_id}"
+    driver.get(url)
+    try:
+        # 馬番クラスが表示されるまで待つ
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "umaban"))
+        )
+    except Exception:
+        return {}
+    html = driver.page_source
+    return parse_syutuba_jockey(html)
 
 # ==================================================
 # ★Dify ワークフロー用ストリーミング関数
@@ -258,14 +288,10 @@ def stream_dify_workflow(full_text: str):
     except Exception as e:
         yield f"⚠️ Request Error: {str(e)}"
 
-
 # ==================================================
 # メイン処理: 全レース実行
 # ==================================================
 def run_all_races(target_races=None):
-    """
-    地方競馬IDルールに基づきスクレイピング -> Difyへ送信 -> ストリーミング表示 -> Supabase保存
-    """
     
     race_numbers = (
         list(range(1, 13))
@@ -306,19 +332,17 @@ def run_all_races(target_races=None):
         ).click()
         
         time.sleep(2)
-
         st.success("ログイン成功。レース分析を開始します。")
 
         # --- 2. 各レース処理 ---
         for r in race_numbers:
             race_num_str = f"{r:02}"
             
-            # ★URL生成ルール変更（ユーザー指定: 年 + 11(固定) + 競馬場 + 01(固定) + レース + 月日）
-            # 例: 2025 + 11 + 11(川崎) + 01 + 01(1R) + 1216(日付)
+            # URL生成
             date_str = f"{MONTH}{DAY}"
             race_id = f"{YEAR}11{PLACE_CODE}01{race_num_str}{date_str}"
 
-            st.markdown(f"### {place_name} {r}R")
+            st.markdown(f"### {place_name} {r}R (ID: {race_id})")
             
             status_area = st.empty()
             result_area = st.empty()
@@ -328,43 +352,52 @@ def run_all_races(target_races=None):
                 # ==========================
                 # Phase A: データ収集中
                 # ==========================
-                status_area.info(f"📡 {place_name}{r}R のデータを収集中... (ID: {race_id})")
+                status_area.info(f"📡 {place_name}{r}R のデータを収集中...")
                 
-                # A-1. 厩舎コメント・基本情報 (地方URL: /chihou/danwa/1/...)
+                # A-1. 厩舎コメント (談話)
                 url_danwa = f"https://s.keibabook.co.jp/chihou/danwa/1/{race_id}"
                 driver.get(url_danwa)
                 time.sleep(1)
                 html_danwa = driver.page_source
                 
-                # 取得可否チェック（タイトルが取れるかで判断）
                 race_info = parse_race_info(html_danwa)
                 danwa_dict = parse_danwa_comments(html_danwa)
 
-                # A-2. 前走インタビューは削除 (ユーザー指示により割愛)
+                # A-2. 出馬表 (騎手・乗り替わり)
+                # ここで新しい関数を使用
+                syutuba_dict = fetch_syutuba_dict(driver, race_id)
 
-                # A-3. 調教 (地方URL: /chihou/cyokyo/1/...)
+                # A-3. 調教
                 cyokyo_dict = fetch_cyokyo_dict(driver, race_id)
 
                 # A-4. データ結合
-                # 地方競馬はすべての馬のデータが揃わないことがあるため、
-                # danwa_dict のキー(馬番)をベースにするか、1~16番までループするか。
-                # ここでは danwa_dict または cyokyo_dict に存在する馬番を網羅的にリストアップする。
-                all_uma = sorted(list(set(list(danwa_dict.keys()) + list(cyokyo_dict.keys()))), key=lambda x: int(x) if x.isdigit() else 99)
+                # 全ての辞書から馬番のリストを作成
+                all_uma = sorted(
+                    list(set(list(danwa_dict.keys()) + list(cyokyo_dict.keys()) + list(syutuba_dict.keys()))),
+                    key=lambda x: int(x) if x.isdigit() else 99
+                )
 
                 merged = []
                 for uma in all_uma:
                     d_txt = danwa_dict.get(uma, '（情報なし）')
                     c_txt = cyokyo_dict.get(uma, '（情報なし）')
                     
+                    # 騎手情報の取得
+                    j_info = syutuba_dict.get(uma, {"name": "不明", "is_change": False})
+                    j_name = j_info["name"]
+                    # 乗り替わりならマークをつける
+                    change_alert = "【⚠️乗り替わり】" if j_info["is_change"] else "【継続騎乗】"
+
                     text = (
                         f"▼[馬番{uma}]\n"
+                        f"  【騎手】 {j_name} {change_alert}\n"
                         f"  【厩舎の話】 {d_txt}\n"
                         f"  【調教】 {c_txt}\n"
                     )
                     merged.append(text)
 
                 if not merged:
-                    status_area.warning(f"⚠️ {place_name} {r}R: データが取得できませんでした(ID: {race_id})。スキップします。")
+                    status_area.warning(f"⚠️ {place_name} {r}R: データ取得失敗。スキップします。")
                     continue
 
                 # プロンプト作成
@@ -376,11 +409,22 @@ def run_all_races(target_races=None):
                 race_header = "\n".join(race_header_lines)
 
                 merged_text = "\n".join(merged)
+                
+                # 南関リーディングのURL（固定または動的）
+                # ここでは汎用的なリーディングページまたは指定されたURLを提示
+                nankan_leading_url = "https://www.nankankeiba.com/leading_kis/180000000003011.do"
+                
                 full_text = (
+                    "■役割\n"
+                    "あなたは南関東競馬のプロフェッショナル予想家です。\n\n"
                     "■レース情報\n"
                     f"{race_header}\n\n"
-                    f"以下は{place_name}{r}Rのデータである。\n"
-                    "各馬について【厩舎の話】および【調教】を基に分析せよ。\n\n"
+                    "■指示\n"
+                    f"以下のデータに基づき、{place_name}{r}Rの展開と推奨馬を分析してください。\n"
+                    "特に以下の点を含めてください：\n"
+                    "1. 「乗り替わり」が発生している馬については、そのプラス/マイナス影響を考察すること。\n"
+                    "2. 騎手の該当コース適性については、一般的な傾向や南関競馬のセオリーを加味すること（以下のURLのデータ等を知識として参照）。\n"
+                    f"   参考URL: {nankan_leading_url}\n\n"
                     "■出走馬詳細データ\n"
                     + merged_text
                 )
@@ -402,7 +446,6 @@ def run_all_races(target_races=None):
                 
                 if full_answer:
                     status_area.success("✅ 分析完了")
-                    # Supabase 保存
                     save_history(
                         YEAR, PLACE_CODE, place_name, MONTH, DAY,
                         race_num_str, race_id, full_answer
