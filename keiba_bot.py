@@ -111,19 +111,54 @@ def parse_syutuba_jockey(html: str):
     soup = BeautifulSoup(html, "html.parser")
     jockey_info = {}
     
+    # スマートフォン版(SP)の出馬表テーブルを特定
+    table = soup.find("table", class_="syutuba_sp")
+    if not table:
+        return {}
+
     # テーブル行(tr)を走査
-    rows = soup.find_all("tr")
-    for row in rows:
-        umaban_td = row.find(["td", "th"], class_="umaban")
-        kisyu_td = row.find("td", class_="kisyu")
+    # tbodyの中身だけを見る
+    tbody = table.find("tbody")
+    if not tbody:
+        return {}
         
-        if umaban_td and kisyu_td:
-            umaban = umaban_td.get_text(strip=True)
-            # 乗り替わり判定（strongタグ有無）
-            is_change = bool(kisyu_td.find("strong"))
-            name = kisyu_td.get_text(strip=True)
+    rows = tbody.find_all("tr")
+    
+    for row in rows:
+        # 1. 馬番の取得
+        # このHTMLでは馬番に特定のclass(umaban)がないため、1つ目のtdを取得します
+        tds = row.find_all("td")
+        if not tds:
+            continue
             
-            jockey_info[umaban] = {"name": name, "is_change": is_change}
+        # 1列目が馬番（テキストが数字かチェック）
+        umaban_text = tds[0].get_text(strip=True)
+        if not umaban_text.isdigit():
+            continue
+            
+        umaban = umaban_text
+
+        # 2. 騎手情報の取得
+        # <td class="left"> の中にある <p class="kisyu"> を探す
+        kisyu_p = row.find("p", class_="kisyu")
+        
+        if kisyu_p:
+            # <a>タグの中に名前がある
+            anchor = kisyu_p.find("a")
+            if anchor:
+                name = anchor.get_text(strip=True)
+                
+                # 乗り替わり判定
+                # <a>タグの中、またはpタグの中に <strong> があるか確認
+                # 実際のHTML: <a ...><strong>騎手名</strong></a> となっている
+                is_change = bool(anchor.find("strong"))
+                
+                jockey_info[umaban] = {"name": name, "is_change": is_change}
+            else:
+                # リンクがない場合（稀なケース）のバックアップ
+                # ただしテキスト全体だと「牡5 野畑凌 56」のようになるため注意が必要ですが、
+                # 通常はaタグがあります。念の為、aタグがない場合は取得しないか、別途処理します。
+                pass
             
     return jockey_info
 
