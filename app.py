@@ -41,7 +41,7 @@ KB_TO_NANKAN_PLACE = {"10": "20", "11": "21", "12": "19", "13": "18"}
 PLACE_NAMES = {"10": "大井", "11": "川崎", "12": "船橋", "13": "浦和"}
 
 # ==================================================
-# 2. スクレイピング関数
+# 2. スクレイピング関数 (強化版)
 # ==================================================
 
 def get_driver():
@@ -49,26 +49,44 @@ def get_driver():
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    # ボット検知回避用のUser-Agent
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     return webdriver.Chrome(options=options)
 
 def get_nankan_base_id(driver, date_str, kb_place_code):
-    """南関公式からベースID(14桁)を取得"""
+    """南関公式からベースIDを取得（より柔軟な検索に変更）"""
     nankan_place = KB_TO_NANKAN_PLACE.get(kb_place_code)
     url = f"https://www.nankankeiba.com/program/{date_str}{nankan_place}.do"
     try:
         driver.get(url)
-        time.sleep(2)
+        time.sleep(3) # 読み込み待ちを長めに
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        # race_infoのリンクから14桁を抽出
-        link = soup.find("a", href=re.compile(r"/race_info/\d+\.do"))
-        if link:
-            match = re.search(r'(\d{14})', link['href'])
-            return match.group(1)
-    except: return None
+        
+        # race_infoを含む全てのリンクをスキャン
+        all_links = soup.find_all("a", href=True)
+        for link in all_links:
+            href = link['href']
+            # YYYYMMDD + PlaceCode を含む14〜16桁の数字を探す
+            match = re.search(rf'({date_str}{nankan_place}\d{{4}})', href)
+            if match:
+                base_id = match.group(1)
+                return base_id
+        
+        # 予備：テキストから開催回を取得（例：第14回）
+        page_text = soup.get_text()
+        kaisuu_match = re.search(r'第(\d+)回', page_text)
+        nichiji_match = re.search(r'第(\d+)日', page_text)
+        if kaisuu_match and nichiji_match:
+            k = kaisuu_match.group(1).zfill(2)
+            n = nichiji_match.group(1).zfill(2)
+            return f"{date_str}{nankan_place}{k}{n}"
+            
+    except Exception as e:
+        st.error(f"南関ベースID取得エラー: {e}")
     return None
 
 def fetch_book_race_ids(driver, date_str, kb_place_code):
-    """競馬ブックからその日の全レースID(16桁)を取得"""
+    """競馬ブックから全レースID取得"""
     url = f"https://s.keibabook.co.jp/chihou/nittei/{date_str}10"
     try:
         driver.get(url)
@@ -79,66 +97,89 @@ def fetch_book_race_ids(driver, date_str, kb_place_code):
             match = re.search(r'(\d{16})', a['href'])
             if match:
                 rid = match.group(1)
-                # IDの6-8桁目が場所コードと一致するか
                 if rid[6:8] == kb_place_code and rid not in ids:
                     ids.append(rid)
         return sorted(ids)
     except: return []
 
 def fetch_jockey_trainer_stats(driver, base_id, r_num, h_num):
-    """南関公式から相性データを取得"""
+    """南関公式から相性データ(nk23対応)を取得"""
+    # base_id(14桁) + レース(2桁) + 固定(01) + 馬番(2桁)
     url = f"https://www.nankankeiba.com/aisyou_cho/{base_id}{str(r_num).zfill(2)}01{str(h_num).zfill(2)}.do"
     try:
         driver.get(url)
         time.sleep(0.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        rows = soup.find_all("tr")
+        # 新サイト構造(nk23)のテーブルを探す
+        table = soup.find("table", class_=re.compile("nk23_c-table01"))
+        if not table:
+            # 旧サイト構造のフォールバック
+            rows = soup.find_all("tr")
+        else:
+            rows = table.find_all("tr")
+            
         for row in rows:
             if "厩舎所属馬" in row.get_text():
                 tds = row.find_all("td")
-                return f"勝率{tds[4].text} 連対{tds[5].text}"
+                if len(tds) >= 6:
+                    return f"勝率{tds[4].text.strip()} 連対率{tds[5].text.strip()}"
     except: pass
     return "データなし"
 
-# 競馬ブックのパース系 (既存コードを圧縮)
 def parse_book_data(driver, race_id):
+    """競馬ブックの出馬表・談話・調教を取得"""
     # 出馬表
     driver.get(f"https://s.keibabook.co.jp/chihou/syutuba/{race_id}")
+    time.sleep(1)
     soup = BeautifulSoup(driver.page_source, "html.parser")
     jockeys = {}
     table = soup.find("table", class_="syutuba_sp")
     if table:
         for row in table.find_all("tr"):
             tds = row.find_all("td")
-            if tds and tds[0].text.isdigit():
+            if tds and tds[0].text.strip().isdigit():
                 u = tds[0].text.strip()
                 kp = row.find("p", class_="kisyu")
                 if kp and kp.find("a"):
                     a = kp.find("a")
                     jockeys[u] = {"name": a.text.strip(), "is_change": bool(a.find("strong"))}
+    
     # 談話
     driver.get(f"https://s.keibabook.co.jp/chihou/danwa/1/{race_id}")
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+    time.sleep(1)
+    soup_d = BeautifulSoup(driver.page_source, "html.parser")
     danwas = {}
-    tbl = soup.find("table", class_="danwa")
-    if tbl:
+    tbl_d = soup_d.find("table", class_="danwa")
+    if tbl_d:
         cur = None
-        for r in tbl.find_all("tr"):
+        for r in tbl_d.find_all("tr"):
             u_td = r.find("td", class_="umaban")
             if u_td: cur = u_td.text.strip()
             txt = r.find("td", class_="danwa")
             if txt and cur: danwas[cur] = txt.text.strip()
-    return jockeys, danwas
+            
+    # 調教
+    driver.get(f"https://s.keibabook.co.jp/chihou/cyokyo/1/{race_id}")
+    time.sleep(1)
+    soup_c = BeautifulSoup(driver.page_source, "html.parser")
+    cyokyos = {}
+    tbl_c = soup_c.find_all("table", class_="cyokyo")
+    for t in tbl_c:
+        u_td = t.find("td", class_="umaban")
+        tanpyo = t.find("td", class_="tanpyo")
+        if u_td and tanpyo:
+            cyokyos[u_td.text.strip()] = tanpyo.text.strip()
 
-# Dify連携
+    return jockeys, danwas, cyokyos
+
 def run_dify(text):
     if not DIFY_API_KEY: return "Dify API Key未設定"
     payload = {"inputs": {"text": text}, "response_mode": "blocking", "user": "bot"}
     headers = {"Authorization": f"Bearer {DIFY_API_KEY}", "Content-Type": "application/json"}
     try:
-        res = requests.post("https://api.dify.ai/v1/workflows/run", headers=headers, json=payload)
-        return res.json().get("data", {}).get("outputs", {}).get("text", "分析失敗")
-    except: return "Dify通信エラー"
+        res = requests.post("https://api.dify.ai/v1/workflows/run", headers=headers, json=payload, timeout=60)
+        return res.json().get("data", {}).get("outputs", {}).get("text", "分析完了（出力テキスト取得失敗）")
+    except Exception as e: return f"Difyエラー: {e}"
 
 # ==================================================
 # 3. UI & 実行
@@ -166,46 +207,47 @@ if st.button("🚀 分析を開始する", type="primary", use_container_width=T
     driver = get_driver()
     
     try:
-        # 1. ログイン
-        st.write("🔑 競馬ブックにログイン中...")
+        st.write("🔑 ログイン中...")
         driver.get("https://s.keibabook.co.jp/login/login")
         driver.find_element(By.NAME, "login_id").send_keys(KEIBA_ID)
         driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(KEIBA_PASS)
         driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
         
-        # 2. ID取得
         st.write("📡 開催情報を取得中...")
         nankan_base_id = get_nankan_base_id(driver, date_str, place_code)
         book_ids = fetch_book_race_ids(driver, date_str, place_code)
         
         if not book_ids:
-            st.error("指定日のレース情報が見つかりませんでした。")
+            st.error(f"競馬ブックで {date_str} {PLACE_NAMES[place_code]} のレースIDが見つかりませんでした。")
         elif not nankan_base_id:
-            st.error("南関東競馬のベースIDが取得できませんでした。休催日ではないか確認してください。")
+            st.error("南関公式のベースIDを取得できませんでした。サイト構成が変更されたか、ボット検知された可能性があります。")
         else:
-            # 3. 各レース実行
+            st.success(f"南関ベースID特定: {nankan_base_id}")
             for rid in book_ids:
-                r_num = int(rid[-2:])
+                # 競馬ブックIDからレース番号を抽出 (重要: rid[10:12]がR番号)
+                r_num = int(rid[10:12])
                 if r_num not in selected: continue
                 
-                with st.expander(f"📊 {r_num}R 分析中...", expanded=True):
+                with st.expander(f"📊 {PLACE_NAMES[place_code]} {r_num}R (ID:{rid})", expanded=True):
                     status = st.empty()
-                    status.info("データ収集中...")
+                    status.info(f"{r_num}R の詳細データを収集中...")
                     
                     # データ取得
-                    jockeys, danwas = parse_book_data(driver, rid)
+                    jockeys, danwas, cyokyos = parse_book_data(driver, rid)
                     
                     merged = []
-                    for uma, info in jockeys.items():
-                        # 相性取得
+                    # 出馬表の馬番順に処理
+                    for uma in sorted(jockeys.keys(), key=int):
+                        info = jockeys[uma]
                         compat = fetch_jockey_trainer_stats(driver, nankan_base_id, r_num, uma)
                         dan = danwas.get(uma, "（なし）")
+                        cyo = cyokyos.get(uma, "（短評なし）")
                         alert = "【⚠️乗り替わり】" if info["is_change"] else ""
-                        merged.append(f"▼[馬番{uma}] {info['name']} {alert}\n 相性: {compat}\n 談話: {dan}")
+                        merged.append(f"▼[馬番{uma}] {info['name']} {alert}\n 相性: {compat}\n 談話: {dan}\n 調教: {cyo}")
                     
-                    prompt = f"{PLACE_NAMES[place_code]} {r_num}R 分析データ\n\n" + "\n".join(merged)
+                    prompt = f"{PLACE_NAMES[place_code]} {r_num}R 分析用データ\n\n" + "\n".join(merged)
                     
-                    status.info("🤖 AI分析中...")
+                    status.info("🤖 AI分析を実行中...")
                     ans = run_dify(prompt)
                     st.markdown(ans)
                     status.success("完了")
