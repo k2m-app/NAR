@@ -24,7 +24,6 @@ def check_password():
     if st.session_state["password_correct"]: return True
     
     st.title("🔒 ログイン")
-    # secretsに ADMIN_PASSWORD がなければ "admin123" でログイン可
     ADMIN_PASS = st.secrets.get("ADMIN_PASSWORD", "admin123")
     user_input = st.text_input("パスワードを入力してください", type="password")
     if st.button("ログイン"):
@@ -104,6 +103,7 @@ def login_keibabook(driver):
         return False
     try:
         driver.get("https://s.keibabook.co.jp/login/login")
+        # 要素が見つかるまで待機
         WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.NAME, "login_id"))).send_keys(KEIBA_ID)
         driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(KEIBA_PASS)
         driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
@@ -222,23 +222,42 @@ def parse_cyokyo(html: str):
     return cyokyo_dict
 
 # ==================================================
-# 4. Netkeiba スクレイピング関数 (タイム指数)
+# 4. Netkeiba スクレイピング関数 (修正版)
 # ==================================================
 
 def login_netkeiba(driver):
+    """Netkeibaにログイン（修正版）"""
     if not NETKEIBA_EMAIL or not NETKEIBA_PASS:
         st.warning("⚠️ Netkeibaのログイン情報がありません。")
         return False
     try:
-        driver.get("https://regist.netkeiba.com/account/?pid=login")
-        time.sleep(1)
-        if "logout" in driver.page_source: return True
+        login_url = "https://regist.netkeiba.com/account/?pid=login"
+        driver.get(login_url)
         
-        driver.find_element(By.NAME, "login_id").send_keys(NETKEIBA_EMAIL)
-        driver.find_element(By.NAME, "pswd").send_keys(NETKEIBA_PASS)
-        driver.find_element(By.CLASS_NAME, "SubmitBtn").click()
-        time.sleep(1)
+        # ページ読み込み待機 (最大10秒)
+        wait = WebDriverWait(driver, 10)
+        
+        # ログインフォームが表示されるか確認
+        if "logout" in driver.page_source:
+            st.info("✅ Netkeiba: 既にログイン済み")
+            return True
+            
+        # ID入力待機
+        login_id_input = wait.until(EC.visibility_of_element_located((By.NAME, "login_id")))
+        login_id_input.clear()
+        login_id_input.send_keys(NETKEIBA_EMAIL)
+        
+        # パスワード入力
+        password_input = driver.find_element(By.NAME, "pswd")
+        password_input.clear()
+        password_input.send_keys(NETKEIBA_PASS)
+        
+        # ★修正ポイント: ボタンを探さず、フォームをsubmitする
+        password_input.submit()
+        
+        time.sleep(2) # 遷移待ち
         return True
+        
     except Exception as e:
         st.error(f"Netkeiba ログインエラー: {e}")
         return False
@@ -389,8 +408,13 @@ if st.button("🚀 分析開始", type="primary"):
     try:
         st.info("🔑 各サイトへログイン中...")
         login_keibabook(driver)
-        login_netkeiba(driver)
         
+        # Netkeibaログイン (タイム指数用)
+        if login_netkeiba(driver):
+            st.success("✅ Netkeibaログイン成功")
+        else:
+            st.warning("⚠️ Netkeibaログイン失敗 (タイム指数は取得できない可能性があります)")
+
         st.info("📡 レースIDを取得中...")
         race_ids = fetch_race_ids_from_schedule(driver, year_str, month_str, day_str, PLACE_CODE)
         
