@@ -13,172 +13,202 @@ from selenium.webdriver.chrome.options import Options
 from bs4 import BeautifulSoup
 
 # ==================================================
-# 1. セキュリティ設定 (パスワードガード)
+# 1. セキュリティ & 設定
 # ==================================================
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
-    if st.session_state["password_correct"]:
-        return True
-
-    st.title("🔒 競馬分析システム ログイン")
+    if st.session_state["password_correct"]: return True
+    st.title("🔒 ログイン")
     ADMIN_PASS = st.secrets.get("ADMIN_PASSWORD", "admin123")
-    user_input = st.text_input("パスワードを入力してください", type="password")
+    user_input = st.text_input("パスワード", type="password")
     if st.button("ログイン"):
         if user_input == ADMIN_PASS:
             st.session_state["password_correct"] = True
             st.rerun()
-        else:
-            st.error("パスワードが正しくありません。")
+        else: st.error("パスワードが違います")
     return False
 
-if not check_password():
-    st.stop()
+if not check_password(): st.stop()
 
-# ==================================================
-# 2. 基本設定・定数
-# ==================================================
+# Secrets
 KEIBA_ID = st.secrets.get("KEIBA_ID", "")
 KEIBA_PASS = st.secrets.get("KEIBA_PASS", "")
 DIFY_API_KEY = st.secrets.get("DIFY_API_KEY", "")
 
-# 競馬場コード変換 (ブック -> 南関)
+# 変換マップ
 KB_TO_NANKAN_PLACE = {"10": "20", "11": "21", "12": "19", "13": "18"}
 PLACE_NAMES = {"10": "大井", "11": "川崎", "12": "船橋", "13": "浦和"}
 
-# 日本時間の日付取得
-jst = pytz.timezone('Asia/Tokyo')
-today = datetime.now(jst)
+# ==================================================
+# 2. スクレイピング関数
+# ==================================================
 
-# ==================================================
-# 3. スクレイピング・ロジック
-# ==================================================
+def get_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    return webdriver.Chrome(options=options)
 
 def get_nankan_base_id(driver, date_str, kb_place_code):
-    """南関の開催回・日数を含むベースID(14桁)を取得"""
+    """南関公式からベースID(14桁)を取得"""
     nankan_place = KB_TO_NANKAN_PLACE.get(kb_place_code)
     url = f"https://www.nankankeiba.com/program/{date_str}{nankan_place}.do"
     try:
         driver.get(url)
-        time.sleep(1)
+        time.sleep(2)
         soup = BeautifulSoup(driver.page_source, "html.parser")
+        # race_infoのリンクから14桁を抽出
         link = soup.find("a", href=re.compile(r"/race_info/\d+\.do"))
         if link:
-            match = re.search(r'(\d{14})\d{2}\.do', link['href'])
-            return match.group(1) if match else None
-    except Exception as e:
-        st.error(f"南関ベースID取得失敗: {e}")
+            match = re.search(r'(\d{14})', link['href'])
+            return match.group(1)
+    except: return None
     return None
 
-def fetch_nankan_compatibility(driver, base_id, race_num, horse_num):
-    """馬番ごとの相性ページから『厩舎所属馬』の成績を抽出"""
-    r_str = str(race_num).zfill(2)
-    h_str = str(horse_num).zfill(2)
-    url = f"https://www.nankankeiba.com/aisyou_cho/{base_id}{r_str}01{h_str}.do"
+def fetch_book_race_ids(driver, date_str, kb_place_code):
+    """競馬ブックからその日の全レースID(16桁)を取得"""
+    url = f"https://s.keibabook.co.jp/chihou/nittei/{date_str}10"
+    try:
+        driver.get(url)
+        time.sleep(2)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        ids = []
+        for a in soup.find_all("a", href=True):
+            match = re.search(r'(\d{16})', a['href'])
+            if match:
+                rid = match.group(1)
+                # IDの6-8桁目が場所コードと一致するか
+                if rid[6:8] == kb_place_code and rid not in ids:
+                    ids.append(rid)
+        return sorted(ids)
+    except: return []
+
+def fetch_jockey_trainer_stats(driver, base_id, r_num, h_num):
+    """南関公式から相性データを取得"""
+    url = f"https://www.nankankeiba.com/aisyou_cho/{base_id}{str(r_num).zfill(2)}01{str(h_num).zfill(2)}.do"
     try:
         driver.get(url)
         time.sleep(0.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        table = soup.find("table", class_="nk23_c-table01__table")
-        if not table: return "データなし"
-        
-        for row in table.find_all("tr"):
+        rows = soup.find_all("tr")
+        for row in rows:
             if "厩舎所属馬" in row.get_text():
-                cols = row.find_all("td")
-                if len(cols) >= 6:
-                    return f"勝率{cols[4].get_text(strip=True)} 連対率{cols[5].get_text(strip=True)}"
-    except: return "取得エラー"
+                tds = row.find_all("td")
+                return f"勝率{tds[4].text} 連対{tds[5].text}"
+    except: pass
     return "データなし"
 
-# --- 競馬ブック系のパース関数 (既存ロジックを統合) ---
-def parse_syutuba_jockey(html):
-    soup = BeautifulSoup(html, "html.parser")
-    jockey_info = {}
+# 競馬ブックのパース系 (既存コードを圧縮)
+def parse_book_data(driver, race_id):
+    # 出馬表
+    driver.get(f"https://s.keibabook.co.jp/chihou/syutuba/{race_id}")
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    jockeys = {}
     table = soup.find("table", class_="syutuba_sp")
-    if not table: return {}
-    for row in table.find_all("tr"):
-        tds = row.find_all("td")
-        if not tds or not tds[0].text.isdigit(): continue
-        umaban = tds[0].text.strip()
-        kisyu_p = row.find("p", class_="kisyu")
-        if kisyu_p and kisyu_p.find("a"):
-            anchor = kisyu_p.find("a")
-            jockey_info[umaban] = {
-                "name": anchor.get_text(strip=True),
-                "is_change": bool(anchor.find("strong"))
-            }
-    return jockey_info
+    if table:
+        for row in table.find_all("tr"):
+            tds = row.find_all("td")
+            if tds and tds[0].text.isdigit():
+                u = tds[0].text.strip()
+                kp = row.find("p", class_="kisyu")
+                if kp and kp.find("a"):
+                    a = kp.find("a")
+                    jockeys[u] = {"name": a.text.strip(), "is_change": bool(a.find("strong"))}
+    # 談話
+    driver.get(f"https://s.keibabook.co.jp/chihou/danwa/1/{race_id}")
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    danwas = {}
+    tbl = soup.find("table", class_="danwa")
+    if tbl:
+        cur = None
+        for r in tbl.find_all("tr"):
+            u_td = r.find("td", class_="umaban")
+            if u_td: cur = u_td.text.strip()
+            txt = r.find("td", class_="danwa")
+            if txt and cur: danwas[cur] = txt.text.strip()
+    return jockeys, danwas
+
+# Dify連携
+def run_dify(text):
+    if not DIFY_API_KEY: return "Dify API Key未設定"
+    payload = {"inputs": {"text": text}, "response_mode": "blocking", "user": "bot"}
+    headers = {"Authorization": f"Bearer {DIFY_API_KEY}", "Content-Type": "application/json"}
+    try:
+        res = requests.post("https://api.dify.ai/v1/workflows/run", headers=headers, json=payload)
+        return res.json().get("data", {}).get("outputs", {}).get("text", "分析失敗")
+    except: return "Dify通信エラー"
 
 # ==================================================
-# 4. メインUIレイアウト
+# 3. UI & 実行
 # ==================================================
-st.title("🏇 南関競馬 騎手×調教師 相性分析Bot")
-st.markdown("競馬ブックの談話・調教情報と、南関公式サイトの相性データを自動突合します。")
+st.title("🏇 南関×ブック 相性分析Bot")
 
-# --- 設定エリア ---
-with st.container():
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        target_date = st.date_input("分析対象日", today)
-    with col2:
-        place_code = st.selectbox("競馬場", options=list(PLACE_NAMES.keys()), format_func=lambda x: f"{x}:{PLACE_NAMES[x]}", index=1)
-    with col3:
-        st.write(" ") # 余白
+jst = pytz.timezone('Asia/Tokyo')
+today_jst = datetime.now(jst)
 
-    st.write("### 🏁 レース選択")
-    all_races = st.checkbox("全レース（1〜12R）を選択", value=True)
-    
-    selected_races = []
-    if not all_races:
-        race_cols = st.columns(6)
-        for i in range(1, 13):
-            with race_cols[(i-1)//2]:
-                if st.checkbox(f"{i}R", key=f"r{i}"):
-                    selected_races.append(i)
-    else:
-        selected_races = list(range(1, 13))
+col1, col2 = st.columns(2)
+with col1: target_date = st.date_input("分析日", today_jst)
+with col2: place_code = st.selectbox("競馬場", options=list(PLACE_NAMES.keys()), format_func=lambda x: f"{x}:{PLACE_NAMES[x]}", index=1)
 
-# --- 実行ボタン ---
+all_races = st.checkbox("全12レース一括分析", value=True)
+selected = []
+if not all_races:
+    cols = st.columns(6)
+    for i in range(1, 13):
+        with cols[(i-1)//2]:
+            if st.checkbox(f"{i}R", key=f"r{i}"): selected.append(i)
+else: selected = list(range(1, 13))
+
 if st.button("🚀 分析を開始する", type="primary", use_container_width=True):
-    if not selected_races:
-        st.warning("分析対象のレースを選択してください。")
-    else:
-        # 日付フォーマット
-        date_str = target_date.strftime("%Y%m%d")
-        y, m, d = date_str[:4], date_str[4:6], date_str[6:8]
+    date_str = target_date.strftime("%Y%m%d")
+    driver = get_driver()
+    
+    try:
+        # 1. ログイン
+        st.write("🔑 競馬ブックにログイン中...")
+        driver.get("https://s.keibabook.co.jp/login/login")
+        driver.find_element(By.NAME, "login_id").send_keys(KEIBA_ID)
+        driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(KEIBA_PASS)
+        driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
         
-        # Selenium 起動
-        options = Options()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        driver = webdriver.Chrome(options=options)
-
-        try:
-            # 1. ログイン処理
-            driver.get("https://s.keibabook.co.jp/login/login")
-            driver.find_element(By.NAME, "login_id").send_keys(KEIBA_ID)
-            driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(KEIBA_PASS)
-            driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-            
-            # 2. 南関ベースIDの取得
-            nankan_base_id = get_nankan_base_id(driver, date_str, place_code)
-            
-            # 3. レースごとのループ
-            for r_num in selected_races:
-                st.subheader(f"📍 {PLACE_NAMES[place_code]} {r_num}R")
+        # 2. ID取得
+        st.write("📡 開催情報を取得中...")
+        nankan_base_id = get_nankan_base_id(driver, date_str, place_code)
+        book_ids = fetch_book_race_ids(driver, date_str, place_code)
+        
+        if not book_ids:
+            st.error("指定日のレース情報が見つかりませんでした。")
+        elif not nankan_base_id:
+            st.error("南関東競馬のベースIDが取得できませんでした。休催日ではないか確認してください。")
+        else:
+            # 3. 各レース実行
+            for rid in book_ids:
+                r_num = int(rid[-2:])
+                if r_num not in selected: continue
                 
-                # A. ブック出馬表から騎手情報取得 (本来はここでIDを逆算するが簡易化)
-                # 注: 実際には日程ページからブックの16桁IDを取得する工程が必要
-                # ここでは前述の `fetch_race_ids_from_schedule` を使う想定
-                
-                # --- [データ収集・突合イメージ] ---
-                # comp_stats = fetch_nankan_compatibility(driver, nankan_base_id, r_num, horse_num)
-                # ... 結合処理 ...
-                # st.write(f"馬番X: {comp_stats}")
-                
-                st.info(f"{r_num}R のデータを収集中... (南関ベースID: {nankan_base_id})")
-                
-                # AI分析呼び出し... (省略)
-                
-        finally:
-            driver.quit()
+                with st.expander(f"📊 {r_num}R 分析中...", expanded=True):
+                    status = st.empty()
+                    status.info("データ収集中...")
+                    
+                    # データ取得
+                    jockeys, danwas = parse_book_data(driver, rid)
+                    
+                    merged = []
+                    for uma, info in jockeys.items():
+                        # 相性取得
+                        compat = fetch_jockey_trainer_stats(driver, nankan_base_id, r_num, uma)
+                        dan = danwas.get(uma, "（なし）")
+                        alert = "【⚠️乗り替わり】" if info["is_change"] else ""
+                        merged.append(f"▼[馬番{uma}] {info['name']} {alert}\n 相性: {compat}\n 談話: {dan}")
+                    
+                    prompt = f"{PLACE_NAMES[place_code]} {r_num}R 分析データ\n\n" + "\n".join(merged)
+                    
+                    status.info("🤖 AI分析中...")
+                    ans = run_dify(prompt)
+                    st.markdown(ans)
+                    status.success("完了")
+                    
+    finally:
+        driver.quit()
