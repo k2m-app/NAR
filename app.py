@@ -32,33 +32,59 @@ def set_race_params(year, place_code, month, day):
     MONTH = str(month).zfill(2)
     DAY = str(day).zfill(2)
 
-# ... (その他のスクレイピング関数は既存のまま) ...
-
 # ==================================================
-# 3. Streamlit UI (サイドバー)
+# Streamlit UI (サイドバー)
 # ==================================================
 st.sidebar.title("🏇 南関×ブック 分析Bot")
 
-# st.text_input の value に自動取得した日付を指定
+# 1. 日付・場所設定
 y = st.sidebar.text_input("年", value=today["year"])
 m = st.sidebar.text_input("月", value=today["month"])
 d = st.sidebar.text_input("日", value=today["day"])
 
-# 開催場所の選択（コードと名前を分離して管理）
 places = {"10": "大井", "11": "川崎", "12": "船橋", "13": "浦和"}
 p_choice = st.sidebar.selectbox(
     "場所", 
     options=list(places.keys()), 
     format_func=lambda x: f"{x}:{places[x]}",
-    index=1 # デフォルトで「11:川崎」を選択
+    index=1
 )
 
-# 実行ボタン
+st.sidebar.write("---")
+
+# 2. レース選択ロジック
+st.sidebar.write("### 🏁 分析対象レース")
+all_races_cb = st.sidebar.checkbox("全レース（1〜12R）を予想する", value=True)
+
+selected_races = []
+
+if all_races_cb:
+    # 全選択の場合は1〜12をリストに入れる
+    selected_races = list(range(1, 13))
+    st.sidebar.info("全レースが対象です")
+else:
+    # 個別選択（3列のグリッドで表示してスペースを節約）
+    st.sidebar.write("個別に選択してください:")
+    cols = st.sidebar.columns(3)
+    for i in range(1, 13):
+        col_idx = (i - 1) % 3  # 0, 1, 2 を繰り返す
+        with cols[col_idx]:
+            if st.checkbox(f"{i}R", key=f"race_{i}"):
+                selected_races.append(i)
+
+st.sidebar.write("---")
+
+# 3. 実行ボタン
 if st.sidebar.button("分析を開始する"):
-    # ここでUIの値をグローバル変数に反映
-    set_race_params(y, p_choice, m, d)
-    
-    st.info(f"📅 実行条件: {YEAR}年{MONTH}月{DAY}日 / 場所コード:{PLACE_CODE}")
-    
-    # 実際の処理を呼び出す
-    # run_all_races()
+    if not selected_races:
+        st.sidebar.error("⚠️ レースを1つ以上選択してください。")
+    else:
+        # グローバル変数に日付と場所をセット
+        set_race_params(y, p_choice, m, d)
+        
+        # 実行メッセージ
+        st.info(f"📅 実行: {YEAR}/{MONTH}/{DAY} ({places[PLACE_CODE]})")
+        st.info(f"対象レース: {sorted(selected_races)}R")
+        
+        # メイン処理を呼び出し（引数に選択されたレースリストを渡す）
+        run_all_races(target_races=selected_races)
